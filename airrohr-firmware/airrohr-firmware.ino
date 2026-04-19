@@ -48,17 +48,17 @@
  *                                                                      *
  ************************************************************************
  *
- * latest build
- * RAM:   [====      ]  41.8% (used 34220 bytes from 81920 bytes)
- * Flash: [=======   ]  67.1% (used 701191 bytes from 1044464 bytes)
- *
+ * latest build using espressif8266@4.2.1 / ArduinoJson v7
+ * DATA:    [====      ]  41.7% (used 34128 bytes from 81920 bytes)
+ * PROGRAM: [======    ]  67.2% (used 701371 bytes from 1044464 bytes)
+ *  
  ************************************************************************/
  
 #include <WString.h>
 #include <pgmspace.h>
 
 // increment on change
-#define SOFTWARE_VERSION_STR "NRZ-2024-135"
+#define SOFTWARE_VERSION_STR "NRZ-2026-136-B1"
 String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 
 /*****************************************************************
@@ -97,9 +97,7 @@ String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 #include <SSD1306.h>
 #include <SH1106.h>
 #include <LiquidCrystal_I2C.h>
-#define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
-#define ARDUINOJSON_ENABLE_ARDUINO_PRINT 0
-#define ARDUINOJSON_DECODE_UNICODE 0
+#include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
 #include "./DHT.h"
@@ -174,6 +172,7 @@ namespace cfg
 	char height_above_sealevel[8] = "0";
 	bool sht3x_read = SHT3X_READ;
 	bool scd30_read = SCD30_READ;
+	bool scd30_auto_calibration = SCD30_AUTO_CALIBRATION;
 	bool ds18b20_read = DS18B20_READ;
 	bool dnms_read = DNMS_READ;
 	char dnms_correction[LEN_DNMS_CORRECTION] = DNMS_CORRECTION;
@@ -189,6 +188,13 @@ namespace cfg
 	bool send2custom = SEND2CUSTOM;
 	bool send2influx = SEND2INFLUX;
 	bool send2csv = SEND2CSV;
+	bool send2mqtt = SEND2MQTT;
+	char host_mqtt[LEN_HOST_MQTT];
+	unsigned port_mqtt = PORT_MQTT;
+	char user_mqtt[LEN_USER_MQTT];
+	char pwd_mqtt[LEN_PASS_MQTT];
+	char topic_mqtt[LEN_TOPIC_MQTT];
+	bool homeassistant_discovery = HOMEASSISTANT_DISCOVERY;
 
 	bool auto_update = AUTO_UPDATE;
 	bool use_beta = USE_BETA;
@@ -237,6 +243,10 @@ namespace cfg
 		strcpy_P(host_influx, HOST_INFLUX);
 		strcpy_P(url_influx, URL_INFLUX);
 		strcpy_P(measurement_name_influx, MEASUREMENT_NAME_INFLUX);
+		strcpy_P(host_mqtt, HOST_MQTT);
+		strcpy_P(user_mqtt, USER_MQTT);
+		strcpy_P(pwd_mqtt, PWD_MQTT);
+		strcpy_P(topic_mqtt, TOPIC_MQTT);
 
 		if (!*fs_ssid)
 		{
@@ -358,6 +368,12 @@ SCD30 scd30;
 TinyGPSPlus gps;
 
 /*****************************************************************
+ * MQTT declaration                                              *
+ *****************************************************************/
+WiFiClient mqttWifiClient;
+PubSubClient mqttClient;
+
+/*****************************************************************
  * Variable Definitions for PPD24NS                              *
  * P1 for PM10 & P2 for PM25                                     *
  *****************************************************************/
@@ -408,14 +424,6 @@ enum
 
 enum
 {
-	NPM_REPLY_HEADER_5 = 5,
-	NPM_REPLY_STATE_5 = 3,
-	NPM_REPLY_DATA_5 = 2,
-	NPM_REPLY_CHECKSUM_5 = 1
-} NPM_waiting_for_5; //for fan speed
-
-enum
-{
 	NPM_REPLY_HEADER_6 = 6,
 	NPM_REPLY_STATE_6 = 4,
 	NPM_REPLY_DATA_6 = 3,
@@ -440,6 +448,8 @@ bool is_PMS_running = true;
 bool is_HPM_running = true;
 bool is_NPM_running = false;
 bool is_IPS_running;
+
+bool mqttConnected = false;
 
 unsigned long sending_time = 0;
 unsigned long last_update_attempt;
@@ -596,13 +606,13 @@ float last_value_NPM_N1 = -1.0;
 float last_value_NPM_N10 = -1.0;
 float last_value_NPM_N25 = -1.0;
 
-float last_value_IPS_P0 = -1.0; //PM1
-float last_value_IPS_P1 = -1.0;	//PM10
-float last_value_IPS_P2 = -1.0;	//PM2.5
+float last_value_IPS_P0 = -1.0;  //PM1
+float last_value_IPS_P1 = -1.0;  //PM10
+float last_value_IPS_P2 = -1.0;  //PM2.5
 float last_value_IPS_P01 = -1.0; //PM0.1
 float last_value_IPS_P03 = -1.0; //PM0.3 //ATTENTION P4 = PM4 POUR SPS30
 float last_value_IPS_P05 = -1.0; //PM0.5
-float last_value_IPS_P5 = -1.0; //PM5
+float last_value_IPS_P5 = -1.0;  //PM5
 float last_value_IPS_N1 = -1.0;
 float last_value_IPS_N10 = -1.0;
 float last_value_IPS_N25 = -1.0;
@@ -639,6 +649,8 @@ unsigned long count_sends = 0;
 unsigned long last_display_millis = 0;
 uint8_t next_display_count = 0;
 
+unsigned long last_scd30_millis = 0;
+
 struct struct_wifiInfo
 {
 	char ssid[LEN_WLANSSID];
@@ -658,6 +670,8 @@ IPAddress addr_static_ip;
 IPAddress addr_static_subnet;
 IPAddress addr_static_gateway;
 IPAddress addr_static_dns;
+
+
 
 #define msSince(timestamp_before) (act_milli - (timestamp_before))
 
@@ -717,9 +731,6 @@ static String SDS_version_date()
 		debug_outln_verbose(FPSTR(DBG_TXT_START_READING), FPSTR(DBG_TXT_SDS011_VERSION_DATE));
 		is_SDS_running = SDS_cmd(PmSensorCmd::Start);
 		delay(250);
-#if defined(ESP8266)
-		serialSDS.perform_work();
-#endif
 		serialSDS.flush();
 		// Query Version/Date
 		SDS_rawcmd(0x07, 0x00, 0x00);
@@ -733,7 +744,7 @@ static String SDS_version_date()
 			{
 				char tmp[20];
 				snprintf_P(tmp, sizeof(tmp), PSTR("%02d-%02d-%02d(%02x%02x)"),
-						   data[1], data[2], data[3], data[4], data[5]);
+							data[1], data[2], data[3], data[4], data[5]);
 				last_value_SDS_version = tmp;
 				break;
 			}
@@ -747,10 +758,9 @@ static String SDS_version_date()
 /*****************************************************************
  * read Next PM sensor serial and firmware date                   *
  *****************************************************************/
-
 static uint8_t NPM_get_state()
 {
-	uint8_t result;
+	uint8_t result = 0;
 	NPM_waiting_for_4 = NPM_REPLY_HEADER_4;
 	debug_outln_info(F("State NPM..."));
 	NPM_cmd(PmSensorCmd2::State);
@@ -798,7 +808,7 @@ static uint8_t NPM_get_state()
 
 static bool NPM_start_stop()
 {
-	bool result;
+	bool result = false;
 	NPM_waiting_for_4 = NPM_REPLY_HEADER_4;
 	debug_outln_info(F("Switch start/stop NPM..."));
 	NPM_cmd(PmSensorCmd2::Change);
@@ -919,67 +929,10 @@ static String NPM_version_date()
 	return last_value_NPM_version;
 }
 
-static void NPM_fan_speed()
+static String NPM_temp_humi()
 {
-
-	NPM_waiting_for_5 = NPM_REPLY_HEADER_5;
-	debug_outln_info(F("Set fan speed to 50 %..."));
-	NPM_cmd(PmSensorCmd2::Speed);
-
-	while (!serialNPM.available())
-	{
-		debug_outln("Wait for Serial...", DEBUG_MAX_INFO);
-	}
-
-	while (serialNPM.available() >= NPM_waiting_for_5)
-	{
-		const uint8_t constexpr header[2] = {0x81, 0x21};
-		uint8_t state[1];
-		uint8_t data[1];
-		uint8_t checksum[1];
-		uint8_t test[5];
-
-		switch (NPM_waiting_for_5)
-		{
-		case NPM_REPLY_HEADER_5:
-			if (serialNPM.find(header, sizeof(header)))
-				NPM_waiting_for_5 = NPM_REPLY_STATE_5;
-			break;
-		case NPM_REPLY_STATE_5:
-			serialNPM.readBytes(state, sizeof(state));
-			NPM_state(state[0]);
-			NPM_waiting_for_5 = NPM_REPLY_DATA_5;
-			break;
-		case NPM_REPLY_DATA_5:
-			if (serialNPM.readBytes(data, sizeof(data)) == sizeof(data))
-			{
-				NPM_data_reader(data, 1);
-			}
-			NPM_waiting_for_5 = NPM_REPLY_CHECKSUM_5;
-			break;
-		case NPM_REPLY_CHECKSUM_5:
-			serialNPM.readBytes(checksum, sizeof(checksum));
-			memcpy(test, header, sizeof(header));
-			memcpy(&test[sizeof(header)], state, sizeof(state));
-			memcpy(&test[sizeof(header) + sizeof(state)], data, sizeof(data));
-			memcpy(&test[sizeof(header) + sizeof(state) + sizeof(data)], checksum, sizeof(checksum));
-			NPM_data_reader(test, 5);
-			NPM_waiting_for_5 = NPM_REPLY_HEADER_5;
-			if (NPM_checksum_valid_5(test))
-			{
-				debug_outln_info(F("Checksum OK..."));
-			}
-			break;
-		}
-	}
-}
-
-
-
-static String NPM_temp_humi() 
-{
-	uint16_t NPM_temp;
-	uint16_t NPM_humi;
+	uint16_t NPM_temp = 0;
+	uint16_t NPM_humi = 0;
 	NPM_waiting_for_8 = NPM_REPLY_HEADER_8;
 	debug_outln_info(F("Temperature/Humidity in Next PM..."));
 	NPM_cmd(PmSensorCmd2::Temphumi);
@@ -1034,11 +987,9 @@ static String NPM_temp_humi()
 			return String(NPM_temp / 100.0f) + " / "+ String(NPM_humi / 100.0f);
 }
 
-
 /*****************************************************************
- * read IPS-7100 sensor serial and firmware date                   *
-*****************************************************************/
-
+ * read IPS-7100 sensor serial and firmware date                 *
+ *****************************************************************/
 static String IPS_version_date()
 {
 	debug_outln_info(F("Version IPS..."));
@@ -1072,9 +1023,9 @@ static String IPS_version_date()
 static void disable_unneeded_nmea()
 {
 	serialGPS->println(F("$PUBX,40,GLL,0,0,0,0*5C")); // Geographic position, latitude / longitude
-													  //	serialGPS->println(F("$PUBX,40,GGA,0,0,0,0*5A"));       // Global Positioning System Fix Data
+//	serialGPS->println(F("$PUBX,40,GGA,0,0,0,0*5A")); // Global Positioning System Fix Data
 	serialGPS->println(F("$PUBX,40,GSA,0,0,0,0*4E")); // GPS DOP and active satellites
-													  //	serialGPS->println(F("$PUBX,40,RMC,0,0,0,0*47"));       // Recommended minimum specific GPS/Transit data
+//	serialGPS->println(F("$PUBX,40,RMC,0,0,0,0*47")); // Recommended minimum specific GPS/Transit data
 	serialGPS->println(F("$PUBX,40,GSV,0,0,0,0*59")); // GNSS satellites in view
 	serialGPS->println(F("$PUBX,40,VTG,0,0,0,0*5E")); // Track made good and ground speed
 }
@@ -1084,7 +1035,7 @@ static void disable_unneeded_nmea()
  *****************************************************************/
 
 /* backward compatibility for the times when we stored booleans as strings */
-static bool boolFromJSON(const DynamicJsonDocument &json, const __FlashStringHelper *key)
+static bool boolFromJSON(const JsonDocument &json, const __FlashStringHelper *key)
 {
 	if (json[key].is<const char *>())
 	{
@@ -1118,7 +1069,7 @@ static void readConfig(bool oldconfig = false)
 	}
 
 	debug_outln_info(F("opened config file..."));
-	DynamicJsonDocument json(JSON_BUFFER_SIZE);
+	JsonDocument json;
 	DeserializationError err = deserializeJson(json, configFile.readString());
 	debug_outln_info(F("parsing json: "), err.f_str());
 	configFile.close();
@@ -1249,7 +1200,7 @@ static void init_config()
  *****************************************************************/
 static bool writeConfig()
 {
-	DynamicJsonDocument json(JSON_BUFFER_SIZE);
+	JsonDocument json;
 	debug_outln_info(F("Saving config..."));
 	json["SOFTWARE_VERSION"] = SOFTWARE_VERSION;
 
@@ -1404,6 +1355,7 @@ static void end_html_page(String &page_content)
 		server.sendContent(page_content);
 	}
 	server.sendContent_P(WEB_PAGE_FOOTER);
+
 }
 
 static void add_form_input(String &page_content, const ConfigShapeId cfgid, const __FlashStringHelper *info, const int length)
@@ -1500,7 +1452,6 @@ static String form_select_lang()
 				 "<option value='ES'>Español (ES)</option>"
 				 "<option value='FR'>Français (FR)</option>"
 				 "<option value='GR'>Ελληνικά (GR)</option>"
-				 "<option value='HR'>Hrvatski (HR)</option>"
 				 "<option value='IT'>Italiano (IT)</option>"
 				 "<option value='JP'>日本語 (JP)</option>"
 				 "<option value='LT'>Lietuvių kalba (LT)</option>"
@@ -1572,7 +1523,8 @@ static bool webserver_request_auth()
 	return true;
 }
 
-static void sendHttpRedirect() {
+static void sendHttpRedirect()
+{
 	const IPAddress defaultIP(
 		default_ip_first_octet, 
 		default_ip_second_octet, 
@@ -1765,6 +1717,7 @@ static void webserver_config_send_body_get(String &page_content)
 	add_form_checkbox_sensor(Config_bmx280_read, FPSTR(INTL_BMX280));
 	add_form_checkbox_sensor(Config_sht3x_read, FPSTR(INTL_SHT3X));
 	add_form_checkbox_sensor(Config_scd30_read, FPSTR(INTL_SCD30));
+	add_form_checkbox_sensor(Config_scd30_auto_calibration, FPSTR(INTL_SCD30_AUTO_CALIBRATION));
 
 	// Paginate page after ~ 1500 Bytes
 	server.sendContent(page_content);
@@ -1842,6 +1795,20 @@ static void webserver_config_send_body_get(String &page_content)
 	add_form_input(page_content, Config_user_influx, FPSTR(INTL_USER), LEN_USER_INFLUX - 1);
 	add_form_input(page_content, Config_pwd_influx, FPSTR(INTL_PASSWORD), LEN_PASS_INFLUX - 1);
 	add_form_input(page_content, Config_measurement_name_influx, FPSTR(INTL_MEASUREMENT), LEN_MEASUREMENT_NAME_INFLUX - 1);
+	page_content += FPSTR(TABLE_TAG_CLOSE_BR);
+	page_content += F("</div></div>");
+
+	page_content += F("<div class='c'><b>MQTT / Home Assistant</b></div><div class='l'>");
+	page_content += form_checkbox(Config_send2mqtt, tmpl(FPSTR(INTL_SEND_TO), F("MQTT")), false);
+	page_content += FPSTR(WEB_NBSP_NBSP_BRACE);
+	page_content += form_checkbox(Config_homeassistant_discovery, F("Home Assistant Discovery"), false);
+	page_content += FPSTR(WEB_BRACE_BR);
+	page_content += FPSTR(TABLE_TAG_OPEN);
+	add_form_input(page_content, Config_host_mqtt, FPSTR(INTL_SERVER), LEN_HOST_MQTT - 1);
+	add_form_input(page_content, Config_port_mqtt, FPSTR(INTL_PORT), MAX_PORT_DIGITS);
+	add_form_input(page_content, Config_user_mqtt, FPSTR(INTL_USER), LEN_USER_MQTT - 1);
+	add_form_input(page_content, Config_pwd_mqtt, FPSTR(INTL_PASSWORD), LEN_PASS_MQTT - 1);
+	add_form_input(page_content, Config_topic_mqtt, F("MQTT Topic"), LEN_TOPIC_MQTT - 1);
 	page_content += FPSTR(TABLE_TAG_CLOSE_BR);
 	page_content += F("</div></div>");
 	page_content += form_submit(FPSTR(INTL_SAVE_AND_RESTART));
@@ -2422,7 +2389,6 @@ static void webserver_status()
 static void webserver_serial()
 {
 	String s(Debug.popLines());
-
 	server.send(s.length() ? 200 : 204, FPSTR(TXT_CONTENT_TYPE_TEXT_PLAIN), s);
 }
 
@@ -2625,7 +2591,7 @@ static void webserver_metrics_endpoint()
 	page_content.replace("$u", String(msSince(time_point_device_start_ms)));
 	page_content.replace("$s", String(cfg::sending_intervall_ms));
 	page_content.replace("$c", String(count_sends));
-	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	JsonDocument json2data;
 	DeserializationError err = deserializeJson(json2data, last_data_string);
 	if (!err)
 	{
@@ -2656,7 +2622,6 @@ static void webserver_metrics_endpoint()
 /*****************************************************************
  * Webserver Images                                              *
  *****************************************************************/
-
 static void webserver_favicon()
 {
 	server.sendHeader(F("Cache-Control"), F("max-age=2592000, public"));
@@ -2714,6 +2679,8 @@ static void webserver_not_found()
  *****************************************************************/
 static void setup_webserver()
 {
+	//server.addHandler( new AllRequestHandler());
+
 	server.on("/", webserver_root);
 	server.on(F("/config"), webserver_config);
 	server.on(F("/wifi"), webserver_wifi);
@@ -2730,6 +2697,7 @@ static void setup_webserver()
 	server.on(F("/favicon.ico"), webserver_favicon);
 	server.on(F(STATIC_PREFIX), webserver_static);
 	server.onNotFound(webserver_not_found);
+	
 
 	debug_outln_info(F("Starting Webserver... "), WiFi.localIP().toString());
 	server.begin();
@@ -2844,8 +2812,8 @@ static void wifiConfig()
 		dnsServer.processNextRequest();
 		server.handleClient();
 #if defined(ESP8266)
-		wdt_reset(); // nodemcu is alive
-		MDNS.update();
+	wdt_reset(); // nodemcu is alive
+	MDNS.update();
 #endif
 		yield();
 	}
@@ -2872,7 +2840,7 @@ static void wifiConfig()
 	{
 		WiFi.begin(cfg::wlanssid, cfg::wlanpwd);
 	}
-	else  // empty password: WiFi AP without a password, e.g. "freifunk" or the like
+	else	// empty password: WiFi AP without a password, e.g. "freifunk" or the like
 	{
 		WiFi.begin(cfg::wlanssid); // since somewhen, the espressif API changed semantics: no password need the 1 args call since.
 	}
@@ -2965,10 +2933,10 @@ static void connectWifi()
 	WiFi.hostname(cfg::fs_ssid);
 	if (addr_static_ip.fromString(cfg::static_ip) && addr_static_subnet.fromString(cfg::static_subnet) && addr_static_gateway.fromString(cfg::static_gateway) && addr_static_dns.fromString(cfg::static_dns))
 	{
-		//ESP argument order is: ip, gateway, subnet, dns1
-		//Arduino arg order is:  ip, dns, gateway, subnet.
-		//To allow compatibility, check first octet of 3rd arg. If 255, interpret as ESP order, otherwise Arduino order.
-		//Here ESP order is used
+		// ESP argument order is: ip, gateway, subnet, dns1
+		// Arduino arg order is:  ip, dns, gateway, subnet.
+		// To allow compatibility, check first octet of 3rd arg. If 255, interpret as ESP order, otherwise Arduino order.
+		// Here ESP order is used
 		WiFi.config(addr_static_ip, addr_static_gateway, addr_static_subnet, addr_static_dns, addr_static_dns);
 	}
 #endif
@@ -3157,7 +3125,7 @@ static unsigned long sendSensorCommunity(const String &data, const int pin, cons
  *****************************************************************/
 static void create_influxdb_string_from_data(String &data_4_influxdb, const String &data)
 {
-	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	JsonDocument json2data;
 	DeserializationError err = deserializeJson(json2data, data);
 	if (!err)
 	{
@@ -3201,7 +3169,7 @@ static void create_influxdb_string_from_data(String &data_4_influxdb, const Stri
  *****************************************************************/
 static void send_csv(const String &data)
 {
-	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	JsonDocument json2data;
 	DeserializationError err = deserializeJson(json2data, data);
 	debug_outln_info(F("CSV Output: "), data);
 	if (!err)
@@ -3235,6 +3203,201 @@ static void send_csv(const String &data)
 	else
 	{
 		debug_outln_error(FPSTR(DBG_TXT_DATA_READ_FAILED));
+	}
+}
+
+/*****************************************************************
+ * Home Assistant MQTT Discovery                                 *
+ *****************************************************************/
+static bool haDiscoverySent = false;
+
+static void publishHASensor(const char* objectId, const char* name, const char* unit, const char* icon, const String& stateTopic, const char* valueTemplate)
+{
+	String discoveryTopic = String(F("homeassistant/sensor/")) + esp_chipid + F("/") + objectId + F("/config");
+	JsonDocument doc;
+	doc[F("name")] = name;
+	doc[F("uniq_id")] = String(esp_chipid) + "_" + objectId;
+	doc[F("stat_t")] = stateTopic;
+	doc[F("val_tpl")] = valueTemplate;
+	doc[F("unit_of_meas")] = unit;
+	if (strlen(icon) > 0)
+	{
+		doc[F("icon")] = icon;
+	}
+	JsonObject dev = doc[F("dev")].to<JsonObject>();
+	dev[F("name")] = String(F("airRohr ")) + esp_chipid;
+	dev[F("mf")] = F("Sensor.Community");
+	dev[F("mdl")] = F("airRohr");
+	JsonArray ids = dev[F("ids")].to<JsonArray>();
+	ids.add(esp_chipid);
+
+	String payload;
+	serializeJson(doc, payload);
+	mqttClient.publish(discoveryTopic.c_str(), payload.c_str(), true);
+	delay(30);
+}
+
+static void sendHomeAssistantDiscovery()
+{
+	if (!cfg::send2mqtt || !cfg::homeassistant_discovery || !mqttConnected)
+	{
+		return;
+	}
+
+	debug_outln_info(F("Sending Home Assistant Discovery..."));
+
+	String stateTopic = String(cfg::topic_mqtt);
+
+	if (cfg::sds_read)
+	{
+		publishHASensor("sds_pm25", "SDS PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SDS_P2 | default('unknown') }}");
+		publishHASensor("sds_pm10", "SDS PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SDS_P1 | default('unknown') }}");
+	}
+	if (cfg::pms_read)
+	{
+		publishHASensor("pms_pm1", "PMS PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.PMS_P0 | default('unknown') }}");
+		publishHASensor("pms_pm25", "PMS PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.PMS_P2 | default('unknown') }}");
+		publishHASensor("pms_pm10", "PMS PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.PMS_P1 | default('unknown') }}");
+	}
+	if (cfg::hpm_read)
+	{
+		publishHASensor("hpm_pm25", "HPM PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.HPM_P2 | default('unknown') }}");
+		publishHASensor("hpm_pm10", "HPM PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.HPM_P1 | default('unknown') }}");
+	}
+	if (cfg::npm_read)
+	{
+		publishHASensor("npm_pm1", "NPM PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.NPM_P0 | default('unknown') }}");
+		publishHASensor("npm_pm25", "NPM PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.NPM_P2 | default('unknown') }}");
+		publishHASensor("npm_pm10", "NPM PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.NPM_P1 | default('unknown') }}");
+	}
+	if (cfg::ips_read)
+	{
+		publishHASensor("ips_pm1", "IPS PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.IPS_P0 | default('unknown') }}");
+		publishHASensor("ips_pm25", "IPS PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.IPS_P2 | default('unknown') }}");
+		publishHASensor("ips_pm10", "IPS PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.IPS_P1 | default('unknown') }}");
+	}
+	if (cfg::sps30_read)
+	{
+		publishHASensor("sps30_pm1", "SPS30 PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P0 | default('unknown') }}");
+		publishHASensor("sps30_pm25", "SPS30 PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P2 | default('unknown') }}");
+		publishHASensor("sps30_pm4", "SPS30 PM4", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P4 | default('unknown') }}");
+		publishHASensor("sps30_pm10", "SPS30 PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P1 | default('unknown') }}");
+	}
+	if (cfg::dht_read)
+	{
+		publishHASensor("dht_temp", "DHT Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.DHT_T | default('unknown') }}");
+		publishHASensor("dht_humi", "DHT Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.DHT_H | default('unknown') }}");
+	}
+	if (cfg::htu21d_read)
+	{
+		publishHASensor("htu21d_temp", "HTU21D Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.HTU21D_T | default('unknown') }}");
+		publishHASensor("htu21d_humi", "HTU21D Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.HTU21D_H | default('unknown') }}");
+	}
+	if (cfg::sht3x_read)
+	{
+		publishHASensor("sht3x_temp", "SHT3X Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.SHT3X_T | default('unknown') }}");
+		publishHASensor("sht3x_humi", "SHT3X Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.SHT3X_H | default('unknown') }}");
+	}
+	if (cfg::bmx280_read)
+	{
+		publishHASensor("bmx280_temp", "BMX280 Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.BMX280_T | default('unknown') }}");
+		publishHASensor("bmx280_press", "BMX280 Druck", "hPa", "mdi:gauge", stateTopic, "{{ value_json.BMX280_P | default('unknown') }}");
+		publishHASensor("bme280_humi", "BME280 Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.BME280_H | default('unknown') }}");
+	}
+	if (cfg::bmp_read)
+	{
+		publishHASensor("bmp_temp", "BMP Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.BMP_T | default('unknown') }}");
+		publishHASensor("bmp_press", "BMP Druck", "hPa", "mdi:gauge", stateTopic, "{{ value_json.BMP_P | default('unknown') }}");
+	}
+	if (cfg::ds18b20_read)
+	{
+		publishHASensor("ds18b20_temp", "DS18B20 Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.DS18B20_T | default('unknown') }}");
+	}
+	if (cfg::scd30_read)
+	{
+		publishHASensor("scd30_co2", "SCD30 CO2", "ppm", "mdi:molecule-co2", stateTopic, "{{ value_json.SCD30_CO2 | default('unknown') }}");
+		publishHASensor("scd30_temp", "SCD30 Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.SCD30_T | default('unknown') }}");
+		publishHASensor("scd30_humi", "SCD30 Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.SCD30_H | default('unknown') }}");
+	}
+	if (cfg::dnms_read)
+	{
+		publishHASensor("dnms_noise", "DNMS Laerm", "dB(A)", "mdi:volume-high", stateTopic, "{{ value_json.DNMS_LA | default('unknown') }}");
+	}
+	if (cfg::gps_read)
+	{
+		publishHASensor("gps_lat", "GPS Breitengrad", "\xc2\xb0", "mdi:crosshairs-gps", stateTopic, "{{ value_json.GPS_lat | default('unknown') }}");
+		publishHASensor("gps_lon", "GPS Laengengrad", "\xc2\xb0", "mdi:crosshairs-gps", stateTopic, "{{ value_json.GPS_lon | default('unknown') }}");
+		publishHASensor("gps_alt", "GPS Hoehe", "m", "mdi:crosshairs-gps", stateTopic, "{{ value_json.GPS_alt | default('unknown') }}");
+	}
+
+	publishHASensor("signal", "WLAN Signal", "dBm", "mdi:wifi", stateTopic, "{{ value_json.signal | default('unknown') }}");
+
+	haDiscoverySent = true;
+	debug_outln_info(F("Home Assistant Discovery sent"));
+}
+
+static void sendMQTTData(const String& data)
+{
+	if (!cfg::send2mqtt || !mqttConnected)
+	{
+		return;
+	}
+
+	JsonDocument json2data;
+	DeserializationError err = deserializeJson(json2data, data);
+	if (err)
+	{
+		debug_outln_error(F("MQTT: JSON parse failed"));
+		return;
+	}
+
+	String payload;
+	serializeJson(json2data[FPSTR(JSON_SENSOR_DATA_VALUES)], payload);
+
+	String topic = String(cfg::topic_mqtt);
+
+	JsonDocument outDoc;
+	for (JsonObject measurement : json2data[FPSTR(JSON_SENSOR_DATA_VALUES)].as<JsonArray>())
+	{
+		outDoc[measurement["value_type"].as<const char*>()] = measurement["value"];
+	}
+	outDoc[F("signal")] = String(last_signal_strength);
+
+	String finalPayload;
+	serializeJson(outDoc, finalPayload);
+
+	mqttClient.publish(topic.c_str(), finalPayload.c_str());
+	debug_outln_info(F("MQTT data sent"));
+}
+
+static void mqttCallback(char* topic, byte* payload, unsigned int length)
+{
+}
+
+static void reconnectMQTT()
+{
+	if (mqttConnected || !cfg::send2mqtt)
+	{
+		return;
+	}
+
+	debug_outln_info(F("Connecting to MQTT..."));
+	String clientId = String(F("airrohr_")) + esp_chipid;
+	if (mqttClient.connect(clientId.c_str(), cfg::user_mqtt[0] ? cfg::user_mqtt : NULL, cfg::pwd_mqtt[0] ? cfg::pwd_mqtt : NULL))
+	{
+		debug_outln_info(F("MQTT connected"));
+		mqttConnected = true;
+		if (cfg::homeassistant_discovery && !haDiscoverySent)
+		{
+			sendHomeAssistantDiscovery();
+		}
+	}
+	else
+	{
+		debug_outln_error(F("MQTT connection failed, rc="));
+		debug_outln_error(F("MQTT connection failed, rc="));
+		debug_outln_info(String(mqttClient.state()));
+		mqttConnected = false;
 	}
 }
 
@@ -3890,7 +4053,6 @@ static __noinline void fetchSensorHPM(String &s)
 /*****************************************************************
  * read Tera Sensor Next PM sensor sensor values                 *
  *****************************************************************/
-
 static void fetchSensorNPM(String &s)
 {
 
@@ -3935,12 +4097,12 @@ static void fetchSensorNPM(String &s)
 				uint8_t data[12];
 				uint8_t checksum[1];
 				uint8_t test[16];
-				uint16_t N1_serial;
-				uint16_t N25_serial;
-				uint16_t N10_serial;
-				uint16_t pm1_serial;
-				uint16_t pm25_serial;
-				uint16_t pm10_serial;
+				uint16_t N1_serial = 0;
+				uint16_t N25_serial = 0;
+				uint16_t N10_serial = 0;
+				uint16_t pm1_serial = 0;
+				uint16_t pm25_serial = 0;
+				uint16_t pm10_serial = 0;
 
 				switch (NPM_waiting_for_16)
 				{
@@ -4043,11 +4205,11 @@ static void fetchSensorNPM(String &s)
 			last_value_NPM_N25 = float(npm_pm25_sum_pcs) / (npm_val_count * 1000.0f);
 
 			add_Value2Json(s, F("NPM_P0"), F("PM1: "), last_value_NPM_P0);
-			add_Value2Json(s, F("NPM_P1"), F("PM10:  "), last_value_NPM_P1);
+			add_Value2Json(s, F("NPM_P1"), F("PM10: "), last_value_NPM_P1);
 			add_Value2Json(s, F("NPM_P2"), F("PM2.5: "), last_value_NPM_P2);
 
 			add_Value2Json(s, F("NPM_N1"), F("NC1.0: "), last_value_NPM_N1);
-			add_Value2Json(s, F("NPM_N10"), F("NC10:  "), last_value_NPM_N10);
+			add_Value2Json(s, F("NPM_N10"), F("NC10: "), last_value_NPM_N10);
 			add_Value2Json(s, F("NPM_N25"), F("NC2.5: "), last_value_NPM_N25);
 
 			debug_outln_info(FPSTR(DBG_TXT_SEP));
@@ -4100,11 +4262,9 @@ static void fetchSensorNPM(String &s)
 	debug_outln_verbose(FPSTR(DBG_TXT_END_READING), FPSTR(SENSORS_NPM));
 }
 
-
 /*****************************************************************
- * read Piera Systems IPS-7100 sensor sensor values                 *
+ * read Piera Systems IPS-7100 sensor sensor values              *
  *****************************************************************/
-
 static void fetchSensorIPS(String &s)
 {
 	debug_outln_verbose(FPSTR(DBG_TXT_START_READING), FPSTR(SENSORS_IPS));
@@ -4222,7 +4382,7 @@ static void fetchSensorIPS(String &s)
 
 	//char *ptr;
 
-    // SI EXCEPTION 28 DECLENCHÈE FLASHER SUR AUTRE PRISE USB.
+	// SI EXCEPTION 28 DECLENCHÈE FLASHER SUR AUTRE PRISE USB.
 
 	ips_pm01_sum_pcs += strtoul(N01_serial.c_str(),NULL,10);
 	ips_pm03_sum_pcs += strtoul(N03_serial.c_str(),NULL,10);
@@ -4311,18 +4471,18 @@ static void fetchSensorIPS(String &s)
 			last_value_IPS_N5 = float(ips_pm5_sum_pcs) / (ips_val_count * 1000.0f);
 
 			add_Value2Json(s, F("IPS_P0"), F("PM1: "), last_value_IPS_P0);
-			add_Value2Json(s, F("IPS_P1"), F("PM10:  "), last_value_IPS_P1);
+			add_Value2Json(s, F("IPS_P1"), F("PM10: "), last_value_IPS_P1);
 			add_Value2Json(s, F("IPS_P2"), F("PM2.5: "), last_value_IPS_P2);
 			add_Value2Json(s, F("IPS_P01"), F("PM0.1: "), last_value_IPS_P01);
-			add_Value2Json(s, F("IPS_P03"), F("PM0.3:  "), last_value_IPS_P03);
+			add_Value2Json(s, F("IPS_P03"), F("PM0.3: "), last_value_IPS_P03);
 			add_Value2Json(s, F("IPS_P05"), F("PM0.5: "), last_value_IPS_P05);
 			add_Value2Json(s, F("IPS_P5"), F("PM5: "), last_value_IPS_P5);
 
 			add_Value2Json(s, F("IPS_N1"), F("NC1.0: "), last_value_IPS_N1);
-			add_Value2Json(s, F("IPS_N10"), F("NC10:  "), last_value_IPS_N10);
+			add_Value2Json(s, F("IPS_N10"), F("NC10: "), last_value_IPS_N10);
 			add_Value2Json(s, F("IPS_N25"), F("NC2.5: "), last_value_IPS_N25);
 			add_Value2Json(s, F("IPS_N01"), F("NC0.1: "), last_value_IPS_N01);
-			add_Value2Json(s, F("IPS_N03"), F("NC0.3:  "), last_value_IPS_N03);
+			add_Value2Json(s, F("IPS_N03"), F("NC0.3: "), last_value_IPS_N03);
 			add_Value2Json(s, F("IPS_N05"), F("NC0.5: "), last_value_IPS_N05);
 			add_Value2Json(s, F("IPS_N5"), F("NC5: "), last_value_IPS_N5);
 
@@ -4400,6 +4560,7 @@ static void fetchSensorIPS(String &s)
 	debug_outln_verbose(FPSTR(DBG_TXT_END_READING), FPSTR(SENSORS_IPS));
 
 }
+
 /*****************************************************************
  * read PPD42NS sensor values                                    *
  *****************************************************************/
@@ -4475,7 +4636,7 @@ static __noinline void fetchSensorPPD(String &s)
 }
 
 /*****************************************************************
-   read SPS30 PM sensor values
+ *  read SPS30 PM sensor values                                  *
  *****************************************************************/
 static void fetchSensorSPS30(String &s)
 {
@@ -4495,13 +4656,13 @@ static void fetchSensorSPS30(String &s)
 	add_Value2Json(s, F("SPS30_P0"), F("PM1.0: "), last_value_SPS30_P0);
 	add_Value2Json(s, F("SPS30_P2"), F("PM2.5: "), last_value_SPS30_P2);
 	add_Value2Json(s, F("SPS30_P4"), F("PM4.0: "), last_value_SPS30_P4);
-	add_Value2Json(s, F("SPS30_P1"), F("PM 10: "), last_value_SPS30_P1);
+	add_Value2Json(s, F("SPS30_P1"), F("PM10: "), last_value_SPS30_P1);
 	add_Value2Json(s, F("SPS30_N05"), F("NC0.5: "), last_value_SPS30_N05);
 	add_Value2Json(s, F("SPS30_N1"), F("NC1.0: "), last_value_SPS30_N1);
 	add_Value2Json(s, F("SPS30_N25"), F("NC2.5: "), last_value_SPS30_N25);
 	add_Value2Json(s, F("SPS30_N4"), F("NC4.0: "), last_value_SPS30_N4);
-	add_Value2Json(s, F("SPS30_N10"), F("NC10:  "), last_value_SPS30_N10);
-	add_Value2Json(s, F("SPS30_TS"), F("TPS:   "), last_value_SPS30_TS);
+	add_Value2Json(s, F("SPS30_N10"), F("NC10: "), last_value_SPS30_N10);
+	add_Value2Json(s, F("SPS30_TS"), F("TPS: "), last_value_SPS30_TS);
 
 	debug_outln_info(F("SPS30 read counter: "), String(SPS30_read_counter));
 	debug_outln_info(F("SPS30 read error counter: "), String(SPS30_read_error_counter));
@@ -4518,7 +4679,7 @@ static void fetchSensorSPS30(String &s)
 }
 
 /*****************************************************************
-   read DNMS values
+ * read DNMS values                                              *
  *****************************************************************/
 static void fetchSensorDNMS(String &s)
 {
@@ -4902,6 +5063,14 @@ static void display_values()
 	float nc040_value = -1.0;
 	float nc050_value = -1.0;
 	float nc100_value = -1.0;
+
+	(void) pm001_value;
+	(void) pm003_value;
+	(void) pm005_value;
+	(void) pm05_value;
+	(void) nc001_value;
+	(void) nc003_value;
+	(void) nc050_value;
 	float la_eq_value = -1.0;
 	float la_max_value = -1.0;
 	float la_min_value = -1.0;
@@ -5058,7 +5227,7 @@ static void display_values()
 	}
 	if (cfg::ips_read)
 	{
-		screens[screen_count++] = 11;  //A VOIR POUR AJOUTER DES ÈCRANS
+		screens[screen_count++] = 11;	//A VOIR POUR AJOUTER DES ÈCRANS
 	}
 	if (cfg::sps30_read)
 	{
@@ -5187,19 +5356,19 @@ static void display_values()
 			display_lines[2] += String(count_sends);
 			break;
 		case 9:
-		    display_header = F("Tera Next PM");
+			display_header = F("Tera Next PM");
 			display_lines[0] = std::move(tmpl(F("PM1: {v} µg/m³"), check_display_value(pm01_value, -1, 1, 6)));
 			display_lines[1] = std::move(tmpl(F("PM2.5: {v} µg/m³"), check_display_value(pm25_value, -1, 1, 6)));
 			display_lines[2] = std::move(tmpl(F("PM10: {v} µg/m³"), check_display_value(pm10_value, -1, 1, 6)));
 			break;
 		case 10:
-		    display_header = F("Tera Next PM");
+			display_header = F("Tera Next PM");
 			display_lines[0] = current_state_npm;
 			display_lines[1] = F("T_NPM / RH_NPM");
 			display_lines[2] = current_th_npm;
 			break;
 		case 11:
-		    display_header = F("Piera IPS-7100");
+			display_header = F("Piera IPS-7100");
 			display_lines[0] = std::move(tmpl(F("PM1: {v} µg/m³"), check_display_value(pm01_value, -1, 1, 6)));
 			display_lines[1] = std::move(tmpl(F("PM2.5: {v} µg/m³"), check_display_value(pm25_value, -1, 1, 6)));
 			display_lines[2] = std::move(tmpl(F("PM10: {v} µg/m³"), check_display_value(pm10_value, -1, 1, 6)));
@@ -5420,7 +5589,7 @@ static bool initBMX280(char addr)
 }
 
 /*****************************************************************
-   Init SPS30 PM Sensor
+ * Init SPS30 PM Sensor                                          *
  *****************************************************************/
 static void initSPS30()
 {
@@ -5453,7 +5622,7 @@ static void initSPS30()
 }
 
 /*****************************************************************
-   Init DNMS - Digital Noise Measurement Sensor
+ * Init DNMS - Digital Noise Measurement Sensor                  *
  *****************************************************************/
 static void initDNMS()
 {
@@ -5476,7 +5645,7 @@ static void initDNMS()
 }
 
 /*****************************************************************
-   Functions
+ * Functions                                                     *
  *****************************************************************/
 
 static void powerOnTestSensors()
@@ -5673,15 +5842,15 @@ static void powerOnTestSensors()
 	if (cfg::scd30_read)
 	{
 		debug_outln_info(F("Read SCD30..."));
-		if (!scd30.begin())
+		if (!scd30.begin(Wire, cfg::scd30_auto_calibration))
 		{
 			debug_outln_error(F("Check SCD30 wiring"));
 			scd30_init_failed = true;
 		}
-/*		else
+		else
 		{
 			scd30.setMeasurementInterval(30);
-		} */
+		}
 	}
 
 	if (cfg::ds18b20_read)
@@ -5847,6 +6016,11 @@ static unsigned long sendDataToOptionalApis(const String &data)
 		send_csv(data);
 	}
 
+	if (cfg::send2mqtt)
+	{
+		sendMQTTData(data);
+	}
+
 	return sum_send_time;
 }
 
@@ -5959,17 +6133,27 @@ else if (cfg::ips_read)
 	logEnabledAPIs();
 	logEnabledDisplays();
 
+	if (cfg::send2mqtt)
+	{
+		debug_outln_info(F("Setting up MQTT..."));
+		mqttClient.setServer(cfg::host_mqtt, cfg::port_mqtt);
+		mqttClient.setCallback(mqttCallback);
+		mqttClient.setClient(mqttWifiClient);
+		reconnectMQTT();
+	}
+
 	delay(50);
 
 	starttime = millis(); // store the start time
 	last_update_attempt = time_point_device_start_ms = starttime;
+	last_display_millis = last_scd30_millis = starttime;
 	if (cfg::npm_read)
 	{
-		last_display_millis = starttime_NPM = starttime;
+		starttime_NPM = starttime;
 	}
 	else
 	{
-		last_display_millis = starttime_SDS = starttime;
+		starttime_SDS = starttime;
 	}
 }
 
@@ -5978,9 +6162,8 @@ else if (cfg::ips_read)
  *****************************************************************/
 void loop(void)
 {
-	unsigned long sleep = SLEEPTIME_MS;
 	String result_PPD, result_SDS, result_PMS, result_HPM, result_NPM, result_IPS;
-	String result_GPS, result_DNMS;
+	String result_GPS, result_DNMS, result_SCD30;
 
 	unsigned sum_send_time = 0;
 
@@ -5988,10 +6171,11 @@ void loop(void)
 	act_milli = millis();
 	send_now = msSince(starttime) > cfg::sending_intervall_ms;
 
-	if (send_now)
-	{
-		sleep = 0;
-	}
+	unsigned int pastTime = act_milli - last_page_load;
+	bool keepAlive = pastTime < KEEP_ALIVE_TIME_MS;
+	unsigned long sleep = send_now || keepAlive 
+		? 0 
+		: SLEEPTIME_MS;
 
 	// Wait at least 30s for each NTP server to sync
 	if (!sntp_time_set && send_now &&
@@ -6060,7 +6244,8 @@ void loop(void)
 			starttime_NPM = act_milli;
 			fetchSensorNPM(result_NPM);
 		}	
-	}else if(cfg::ips_read)
+	}
+	if(cfg::ips_read)
 	{
 		if ((msSince(starttime_IPS) > SAMPLETIME_IPS_MS) || send_now)
 		{
@@ -6068,25 +6253,20 @@ void loop(void)
 			fetchSensorIPS(result_IPS);
 		}	
 	}
-	else
+	if ((msSince(starttime_SDS) > SAMPLETIME_SDS_MS) || send_now)
 	{
-		if ((msSince(starttime_SDS) > SAMPLETIME_SDS_MS) || send_now)
+		starttime_SDS = act_milli;
+		if (cfg::sds_read)
 		{
-			starttime_SDS = act_milli;
-			if (cfg::sds_read)
-			{
-				fetchSensorSDS(result_SDS);
-			}
-
-			if (cfg::pms_read)
-			{
-				fetchSensorPMS(result_PMS);
-			}
-
-			if (cfg::hpm_read)
-			{
-				fetchSensorHPM(result_HPM);
-			}
+			fetchSensorSDS(result_SDS);
+		}
+		if (cfg::pms_read)
+		{
+			fetchSensorPMS(result_PMS);
+		}
+		if (cfg::hpm_read)
+		{
+			fetchSensorHPM(result_HPM);
 		}
 	}
 
@@ -6103,6 +6283,26 @@ void loop(void)
 			// getting GPS coordinates
 			fetchSensorGPS(result_GPS);
 			starttime_GPS = act_milli;
+		}
+	}
+
+	if ((msSince(last_scd30_millis) > SCD30_UPDATE_INTERVAL_MS) && cfg::scd30_read && (!scd30_init_failed))
+	{
+		fetchSensorSCD30(result_SCD30);
+		last_scd30_millis = act_milli;
+	}
+
+	if (cfg::send2mqtt)
+	{
+		if (!mqttClient.connected())
+		{
+			mqttConnected = false;
+			haDiscoverySent = false;
+			reconnectMQTT();
+		}
+		else
+		{
+			mqttClient.loop();
 		}
 	}
 
@@ -6297,20 +6497,11 @@ void loop(void)
 
 #if defined(ESP8266)
 	MDNS.update();
-	if (cfg::npm_read)
-	{
-		serialNPM.perform_work();
-	}
-	else
-	{
-		serialSDS.perform_work();
-	}
-
 #endif
 
 	// Sleep if all of the tasks have an event in the future. The chip can then
 	// enter a lower power mode.
-	if (cfg::powersave) {
+	if (cfg::powersave && sleep > 0) {
 		delay(sleep);
 	}
 

@@ -34,6 +34,7 @@ const char INTL_BMP180[] PROGMEM = "BMP180 ({t}, {p})";
 const char INTL_BMX280[] PROGMEM = "BME280 ({t}, {h}, {p}), BMP280 ({t}, {p})";
 const char INTL_SHT3X[] PROGMEM = "SHT3X ({t}, {h})";
 const char INTL_SCD30[] PROGMEM = "SCD30 ({t}, {h}, CO₂)";
+const char INTL_SCD30_AUTO_CALIBRATION[] PROGMEM = "SCD30 Auto Calibration";
 const char INTL_DS18B20[] PROGMEM = "DS18B20 ({t})";
 const char INTL_DNMS[] PROGMEM = "DNMS ({l_a})";
 const char INTL_DNMS_CORRECTION[] PROGMEM = "補正量（単位：dB(A)";

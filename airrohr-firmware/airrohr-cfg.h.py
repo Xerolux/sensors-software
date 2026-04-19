@@ -23,6 +23,7 @@ Bool		bmp_read
 Bool		bmx280_read
 Bool		sht3x_read
 Bool		scd30_read
+Bool		scd30_auto_calibration
 Bool		ds18b20_read
 Bool		dnms_read
 String		dnms_correction
@@ -65,7 +66,14 @@ String		user_custom
 Password		pwd_custom
 Bool		ssl_custom
 Bool		send2influx
-String		host_influx
+Bool		send2mqtt
+	String		host_mqtt
+	UInt		port_mqtt
+	String		user_mqtt
+	Password	pwd_mqtt
+	String		topic_mqtt
+	Bool		homeassistant_discovery
+	String		host_influx
 String		url_influx
 UInt		port_influx
 String		user_influx

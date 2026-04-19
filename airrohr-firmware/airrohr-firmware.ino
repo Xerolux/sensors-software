@@ -97,6 +97,7 @@ String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 #include <SSD1306.h>
 #include <SH1106.h>
 #include <LiquidCrystal_I2C.h>
+#include <PubSubClient.h>
 #define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
 #define ARDUINOJSON_ENABLE_ARDUINO_PRINT 0
 #define ARDUINOJSON_DECODE_UNICODE 0
@@ -190,6 +191,13 @@ namespace cfg
 	bool send2custom = SEND2CUSTOM;
 	bool send2influx = SEND2INFLUX;
 	bool send2csv = SEND2CSV;
+	bool send2mqtt = SEND2MQTT;
+	char host_mqtt[LEN_HOST_MQTT];
+	unsigned port_mqtt = PORT_MQTT;
+	char user_mqtt[LEN_USER_MQTT];
+	char pwd_mqtt[LEN_PASS_MQTT];
+	char topic_mqtt[LEN_TOPIC_MQTT];
+	bool homeassistant_discovery = HOMEASSISTANT_DISCOVERY;
 
 	bool auto_update = AUTO_UPDATE;
 	bool use_beta = USE_BETA;
@@ -238,6 +246,10 @@ namespace cfg
 		strcpy_P(host_influx, HOST_INFLUX);
 		strcpy_P(url_influx, URL_INFLUX);
 		strcpy_P(measurement_name_influx, MEASUREMENT_NAME_INFLUX);
+		strcpy_P(host_mqtt, HOST_MQTT);
+		strcpy_P(user_mqtt, USER_MQTT);
+		strcpy_P(pwd_mqtt, PWD_MQTT);
+		strcpy_P(topic_mqtt, TOPIC_MQTT);
 
 		if (!*fs_ssid)
 		{
@@ -359,6 +371,12 @@ SCD30 scd30;
 TinyGPSPlus gps;
 
 /*****************************************************************
+ * MQTT declaration                                              *
+ *****************************************************************/
+WiFiClient mqttWifiClient;
+PubSubClient mqttClient;
+
+/*****************************************************************
  * Variable Definitions for PPD24NS                              *
  * P1 for PM10 & P2 for PM25                                     *
  *****************************************************************/
@@ -433,6 +451,8 @@ bool is_PMS_running = true;
 bool is_HPM_running = true;
 bool is_NPM_running = false;
 bool is_IPS_running;
+
+bool mqttConnected = false;
 
 unsigned long sending_time = 0;
 unsigned long last_update_attempt;
@@ -1781,6 +1801,20 @@ static void webserver_config_send_body_get(String &page_content)
 	add_form_input(page_content, Config_user_influx, FPSTR(INTL_USER), LEN_USER_INFLUX - 1);
 	add_form_input(page_content, Config_pwd_influx, FPSTR(INTL_PASSWORD), LEN_PASS_INFLUX - 1);
 	add_form_input(page_content, Config_measurement_name_influx, FPSTR(INTL_MEASUREMENT), LEN_MEASUREMENT_NAME_INFLUX - 1);
+	page_content += FPSTR(TABLE_TAG_CLOSE_BR);
+	page_content += F("</div></div>");
+
+	page_content += F("<div class='c'><b>MQTT / Home Assistant</b></div><div class='l'>");
+	page_content += form_checkbox(Config_send2mqtt, tmpl(FPSTR(INTL_SEND_TO), F("MQTT")), false);
+	page_content += FPSTR(WEB_NBSP_NBSP_BRACE);
+	page_content += form_checkbox(Config_homeassistant_discovery, F("Home Assistant Discovery"), false);
+	page_content += FPSTR(WEB_BRACE_BR);
+	page_content += FPSTR(TABLE_TAG_OPEN);
+	add_form_input(page_content, Config_host_mqtt, FPSTR(INTL_SERVER), LEN_HOST_MQTT - 1);
+	add_form_input(page_content, Config_port_mqtt, FPSTR(INTL_PORT), MAX_PORT_DIGITS);
+	add_form_input(page_content, Config_user_mqtt, FPSTR(INTL_USER), LEN_USER_MQTT - 1);
+	add_form_input(page_content, Config_pwd_mqtt, FPSTR(INTL_PASSWORD), LEN_PASS_MQTT - 1);
+	add_form_input(page_content, Config_topic_mqtt, F("MQTT Topic"), LEN_TOPIC_MQTT - 1);
 	page_content += FPSTR(TABLE_TAG_CLOSE_BR);
 	page_content += F("</div></div>");
 	page_content += form_submit(FPSTR(INTL_SAVE_AND_RESTART));
@@ -3175,6 +3209,201 @@ static void send_csv(const String &data)
 	else
 	{
 		debug_outln_error(FPSTR(DBG_TXT_DATA_READ_FAILED));
+	}
+}
+
+/*****************************************************************
+ * Home Assistant MQTT Discovery                                 *
+ *****************************************************************/
+static bool haDiscoverySent = false;
+
+static void publishHASensor(const char* objectId, const char* name, const char* unit, const char* icon, const String& stateTopic, const char* valueTemplate)
+{
+	String discoveryTopic = String(F("homeassistant/sensor/")) + esp_chipid + F("/") + objectId + F("/config");
+	DynamicJsonDocument doc(512);
+	doc[F("name")] = name;
+	doc[F("uniq_id")] = String(esp_chipid) + "_" + objectId;
+	doc[F("stat_t")] = stateTopic;
+	doc[F("val_tpl")] = valueTemplate;
+	doc[F("unit_of_meas")] = unit;
+	if (strlen(icon) > 0)
+	{
+		doc[F("icon")] = icon;
+	}
+	JsonObject dev = doc.createNestedObject(F("dev"));
+	dev[F("name")] = String(F("airRohr ")) + esp_chipid;
+	dev[F("mf")] = F("Sensor.Community");
+	dev[F("mdl")] = F("airRohr");
+	JsonArray ids = dev.createNestedArray(F("ids"));
+	ids.add(esp_chipid);
+
+	String payload;
+	serializeJson(doc, payload);
+	mqttClient.publish(discoveryTopic.c_str(), payload.c_str(), true);
+	delay(30);
+}
+
+static void sendHomeAssistantDiscovery()
+{
+	if (!cfg::send2mqtt || !cfg::homeassistant_discovery || !mqttConnected)
+	{
+		return;
+	}
+
+	debug_outln_info(F("Sending Home Assistant Discovery..."));
+
+	String stateTopic = String(cfg::topic_mqtt);
+
+	if (cfg::sds_read)
+	{
+		publishHASensor("sds_pm25", "SDS PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SDS_P2 | default('unknown') }}");
+		publishHASensor("sds_pm10", "SDS PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SDS_P1 | default('unknown') }}");
+	}
+	if (cfg::pms_read)
+	{
+		publishHASensor("pms_pm1", "PMS PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.PMS_P0 | default('unknown') }}");
+		publishHASensor("pms_pm25", "PMS PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.PMS_P2 | default('unknown') }}");
+		publishHASensor("pms_pm10", "PMS PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.PMS_P1 | default('unknown') }}");
+	}
+	if (cfg::hpm_read)
+	{
+		publishHASensor("hpm_pm25", "HPM PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.HPM_P2 | default('unknown') }}");
+		publishHASensor("hpm_pm10", "HPM PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.HPM_P1 | default('unknown') }}");
+	}
+	if (cfg::npm_read)
+	{
+		publishHASensor("npm_pm1", "NPM PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.NPM_P0 | default('unknown') }}");
+		publishHASensor("npm_pm25", "NPM PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.NPM_P2 | default('unknown') }}");
+		publishHASensor("npm_pm10", "NPM PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.NPM_P1 | default('unknown') }}");
+	}
+	if (cfg::ips_read)
+	{
+		publishHASensor("ips_pm1", "IPS PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.IPS_P0 | default('unknown') }}");
+		publishHASensor("ips_pm25", "IPS PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.IPS_P2 | default('unknown') }}");
+		publishHASensor("ips_pm10", "IPS PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.IPS_P1 | default('unknown') }}");
+	}
+	if (cfg::sps30_read)
+	{
+		publishHASensor("sps30_pm1", "SPS30 PM1", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P0 | default('unknown') }}");
+		publishHASensor("sps30_pm25", "SPS30 PM2.5", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P2 | default('unknown') }}");
+		publishHASensor("sps30_pm4", "SPS30 PM4", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P4 | default('unknown') }}");
+		publishHASensor("sps30_pm10", "SPS30 PM10", "\xc2\xb5g/m\xc2\xb3", "mdi:weather-dust", stateTopic, "{{ value_json.SPS30_P1 | default('unknown') }}");
+	}
+	if (cfg::dht_read)
+	{
+		publishHASensor("dht_temp", "DHT Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.DHT_T | default('unknown') }}");
+		publishHASensor("dht_humi", "DHT Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.DHT_H | default('unknown') }}");
+	}
+	if (cfg::htu21d_read)
+	{
+		publishHASensor("htu21d_temp", "HTU21D Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.HTU21D_T | default('unknown') }}");
+		publishHASensor("htu21d_humi", "HTU21D Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.HTU21D_H | default('unknown') }}");
+	}
+	if (cfg::sht3x_read)
+	{
+		publishHASensor("sht3x_temp", "SHT3X Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.SHT3X_T | default('unknown') }}");
+		publishHASensor("sht3x_humi", "SHT3X Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.SHT3X_H | default('unknown') }}");
+	}
+	if (cfg::bmx280_read)
+	{
+		publishHASensor("bmx280_temp", "BMX280 Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.BMX280_T | default('unknown') }}");
+		publishHASensor("bmx280_press", "BMX280 Druck", "hPa", "mdi:gauge", stateTopic, "{{ value_json.BMX280_P | default('unknown') }}");
+		publishHASensor("bme280_humi", "BME280 Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.BME280_H | default('unknown') }}");
+	}
+	if (cfg::bmp_read)
+	{
+		publishHASensor("bmp_temp", "BMP Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.BMP_T | default('unknown') }}");
+		publishHASensor("bmp_press", "BMP Druck", "hPa", "mdi:gauge", stateTopic, "{{ value_json.BMP_P | default('unknown') }}");
+	}
+	if (cfg::ds18b20_read)
+	{
+		publishHASensor("ds18b20_temp", "DS18B20 Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.DS18B20_T | default('unknown') }}");
+	}
+	if (cfg::scd30_read)
+	{
+		publishHASensor("scd30_co2", "SCD30 CO2", "ppm", "mdi:molecule-co2", stateTopic, "{{ value_json.SCD30_CO2 | default('unknown') }}");
+		publishHASensor("scd30_temp", "SCD30 Temperatur", "\xc2\xb0""C", "mdi:thermometer", stateTopic, "{{ value_json.SCD30_T | default('unknown') }}");
+		publishHASensor("scd30_humi", "SCD30 Luftfeuchte", "%", "mdi:water-percent", stateTopic, "{{ value_json.SCD30_H | default('unknown') }}");
+	}
+	if (cfg::dnms_read)
+	{
+		publishHASensor("dnms_noise", "DNMS Laerm", "dB(A)", "mdi:volume-high", stateTopic, "{{ value_json.DNMS_LA | default('unknown') }}");
+	}
+	if (cfg::gps_read)
+	{
+		publishHASensor("gps_lat", "GPS Breitengrad", "\xc2\xb0", "mdi:crosshairs-gps", stateTopic, "{{ value_json.GPS_lat | default('unknown') }}");
+		publishHASensor("gps_lon", "GPS Laengengrad", "\xc2\xb0", "mdi:crosshairs-gps", stateTopic, "{{ value_json.GPS_lon | default('unknown') }}");
+		publishHASensor("gps_alt", "GPS Hoehe", "m", "mdi:crosshairs-gps", stateTopic, "{{ value_json.GPS_alt | default('unknown') }}");
+	}
+
+	publishHASensor("signal", "WLAN Signal", "dBm", "mdi:wifi", stateTopic, "{{ value_json.signal | default('unknown') }}");
+
+	haDiscoverySent = true;
+	debug_outln_info(F("Home Assistant Discovery sent"));
+}
+
+static void sendMQTTData(const String& data)
+{
+	if (!cfg::send2mqtt || !mqttConnected)
+	{
+		return;
+	}
+
+	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	DeserializationError err = deserializeJson(json2data, data);
+	if (err)
+	{
+		debug_outln_error(F("MQTT: JSON parse failed"));
+		return;
+	}
+
+	String payload;
+	serializeJson(json2data[FPSTR(JSON_SENSOR_DATA_VALUES)], payload);
+
+	String topic = String(cfg::topic_mqtt);
+
+	StaticJsonDocument<512> outDoc;
+	for (JsonObject measurement : json2data[FPSTR(JSON_SENSOR_DATA_VALUES)].as<JsonArray>())
+	{
+		outDoc[measurement["value_type"].as<const char*>()] = measurement["value"];
+	}
+	outDoc[F("signal")] = String(last_signal_strength);
+
+	String finalPayload;
+	serializeJson(outDoc, finalPayload);
+
+	mqttClient.publish(topic.c_str(), finalPayload.c_str());
+	debug_outln_info(F("MQTT data sent"));
+}
+
+static void mqttCallback(char* topic, byte* payload, unsigned int length)
+{
+}
+
+static void reconnectMQTT()
+{
+	if (mqttConnected || !cfg::send2mqtt)
+	{
+		return;
+	}
+
+	debug_outln_info(F("Connecting to MQTT..."));
+	String clientId = String(F("airrohr_")) + esp_chipid;
+	if (mqttClient.connect(clientId.c_str(), cfg::user_mqtt[0] ? cfg::user_mqtt : NULL, cfg::pwd_mqtt[0] ? cfg::pwd_mqtt : NULL))
+	{
+		debug_outln_info(F("MQTT connected"));
+		mqttConnected = true;
+		if (cfg::homeassistant_discovery && !haDiscoverySent)
+		{
+			sendHomeAssistantDiscovery();
+		}
+	}
+	else
+	{
+		debug_outln_error(F("MQTT connection failed, rc="));
+		debug_outln_error(F("MQTT connection failed, rc="));
+		debug_outln_info(String(mqttClient.state()));
+		mqttConnected = false;
 	}
 }
 
@@ -5793,6 +6022,11 @@ static unsigned long sendDataToOptionalApis(const String &data)
 		send_csv(data);
 	}
 
+	if (cfg::send2mqtt)
+	{
+		sendMQTTData(data);
+	}
+
 	return sum_send_time;
 }
 
@@ -5904,6 +6138,15 @@ else if (cfg::ips_read)
 	powerOnTestSensors();
 	logEnabledAPIs();
 	logEnabledDisplays();
+
+	if (cfg::send2mqtt)
+	{
+		debug_outln_info(F("Setting up MQTT..."));
+		mqttClient.setServer(cfg::host_mqtt, cfg::port_mqtt);
+		mqttClient.setCallback(mqttCallback);
+		mqttClient.setClient(mqttWifiClient);
+		reconnectMQTT();
+	}
 
 	delay(50);
 
@@ -6053,6 +6296,20 @@ void loop(void)
 	{
 		fetchSensorSCD30(result_SCD30);
 		last_scd30_millis = act_milli;
+	}
+
+	if (cfg::send2mqtt)
+	{
+		if (!mqttClient.connected())
+		{
+			mqttConnected = false;
+			haDiscoverySent = false;
+			reconnectMQTT();
+		}
+		else
+		{
+			mqttClient.loop();
+		}
 	}
 
 	if ((msSince(last_display_millis) > DISPLAY_UPDATE_INTERVAL_MS) &&

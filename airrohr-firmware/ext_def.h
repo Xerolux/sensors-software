@@ -93,9 +93,17 @@ static const char URL_CUSTOM[] PROGMEM = "/data.php";
 #define SSL_CUSTOM 0
 
 // define own InfluxDB
-static const char HOST_INFLUX[] PROGMEM = "influx.server";
-static const char URL_INFLUX[] PROGMEM = "/write?db=sensorcommunity";
+#define HOST_INFLUX "influx.server"
+#define URL_INFLUX "/write?db=sensorcommunity"
 #define PORT_INFLUX 8086
+
+// define own MQTT
+#define HOST_MQTT ""
+#define PORT_MQTT 1883
+#define USER_MQTT ""
+#define PWD_MQTT ""
+#define TOPIC_MQTT "airrohr"
+#define HOMEASSISTANT_DISCOVERY 1
 #define USER_INFLUX ""
 #define PWD_INFLUX ""
 static const char MEASUREMENT_NAME_INFLUX[] PROGMEM = "feinstaub";

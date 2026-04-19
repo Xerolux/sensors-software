@@ -90,6 +90,13 @@ enum ConfigShapeId {
 	Config_pwd_custom,
 	Config_ssl_custom,
 	Config_send2influx,
+	Config_send2mqtt,
+	Config_host_mqtt,
+	Config_port_mqtt,
+	Config_user_mqtt,
+	Config_pwd_mqtt,
+	Config_topic_mqtt,
+	Config_homeassistant_discovery,
 	Config_host_influx,
 	Config_url_influx,
 	Config_port_influx,
@@ -163,6 +170,13 @@ static constexpr char CFG_KEY_USER_CUSTOM[] PROGMEM = "user_custom";
 static constexpr char CFG_KEY_PWD_CUSTOM[] PROGMEM = "pwd_custom";
 static constexpr char CFG_KEY_SSL_CUSTOM[] PROGMEM = "ssl_custom";
 static constexpr char CFG_KEY_SEND2INFLUX[] PROGMEM = "send2influx";
+static constexpr char CFG_KEY_SEND2MQTT[] PROGMEM = "send2mqtt";
+static constexpr char CFG_KEY_HOST_MQTT[] PROGMEM = "host_mqtt";
+static constexpr char CFG_KEY_PORT_MQTT[] PROGMEM = "port_mqtt";
+static constexpr char CFG_KEY_USER_MQTT[] PROGMEM = "user_mqtt";
+static constexpr char CFG_KEY_PWD_MQTT[] PROGMEM = "pwd_mqtt";
+static constexpr char CFG_KEY_TOPIC_MQTT[] PROGMEM = "topic_mqtt";
+static constexpr char CFG_KEY_HOMEASSISTANT_DISCOVERY[] PROGMEM = "homeassistant_discovery";
 static constexpr char CFG_KEY_HOST_INFLUX[] PROGMEM = "host_influx";
 static constexpr char CFG_KEY_URL_INFLUX[] PROGMEM = "url_influx";
 static constexpr char CFG_KEY_PORT_INFLUX[] PROGMEM = "port_influx";
@@ -236,6 +250,13 @@ static constexpr ConfigShapeEntry configShape[] PROGMEM = {
 	{ Config_Type_Password, sizeof(cfg::pwd_custom)-1, CFG_KEY_PWD_CUSTOM, cfg::pwd_custom },
 	{ Config_Type_Bool, 0, CFG_KEY_SSL_CUSTOM, &cfg::ssl_custom },
 	{ Config_Type_Bool, 0, CFG_KEY_SEND2INFLUX, &cfg::send2influx },
+	{ Config_Type_Bool, 0, CFG_KEY_SEND2MQTT, &cfg::send2mqtt },
+	{ Config_Type_String, sizeof(cfg::host_mqtt)-1, CFG_KEY_HOST_MQTT, cfg::host_mqtt },
+	{ Config_Type_UInt, 0, CFG_KEY_PORT_MQTT, &cfg::port_mqtt },
+	{ Config_Type_String, sizeof(cfg::user_mqtt)-1, CFG_KEY_USER_MQTT, cfg::user_mqtt },
+	{ Config_Type_Password, sizeof(cfg::pwd_mqtt)-1, CFG_KEY_PWD_MQTT, cfg::pwd_mqtt },
+	{ Config_Type_String, sizeof(cfg::topic_mqtt)-1, CFG_KEY_TOPIC_MQTT, cfg::topic_mqtt },
+	{ Config_Type_Bool, 0, CFG_KEY_HOMEASSISTANT_DISCOVERY, &cfg::homeassistant_discovery },
 	{ Config_Type_String, sizeof(cfg::host_influx)-1, CFG_KEY_HOST_INFLUX, cfg::host_influx },
 	{ Config_Type_String, sizeof(cfg::url_influx)-1, CFG_KEY_URL_INFLUX, cfg::url_influx },
 	{ Config_Type_UInt, 0, CFG_KEY_PORT_INFLUX, &cfg::port_influx },

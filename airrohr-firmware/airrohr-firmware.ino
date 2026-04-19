@@ -174,6 +174,7 @@ namespace cfg
 	char height_above_sealevel[8] = "0";
 	bool sht3x_read = SHT3X_READ;
 	bool scd30_read = SCD30_READ;
+	bool scd30_auto_calibration = SCD30_AUTO_CALIBRATION;
 	bool ds18b20_read = DS18B20_READ;
 	bool dnms_read = DNMS_READ;
 	char dnms_correction[LEN_DNMS_CORRECTION] = DNMS_CORRECTION;
@@ -405,14 +406,6 @@ enum
 	NPM_REPLY_STATE_4 = 2,
 	NPM_REPLY_CHECKSUM_4 = 1
 } NPM_waiting_for_4; //for change
-
-enum
-{
-	NPM_REPLY_HEADER_5 = 5,
-	NPM_REPLY_STATE_5 = 3,
-	NPM_REPLY_DATA_5 = 2,
-	NPM_REPLY_CHECKSUM_5 = 1
-} NPM_waiting_for_5; //for fan speed
 
 enum
 {
@@ -753,7 +746,7 @@ static String SDS_version_date()
  *****************************************************************/
 static uint8_t NPM_get_state()
 {
-	uint8_t result;
+	uint8_t result = 0;
 	NPM_waiting_for_4 = NPM_REPLY_HEADER_4;
 	debug_outln_info(F("State NPM..."));
 	NPM_cmd(PmSensorCmd2::State);
@@ -801,7 +794,7 @@ static uint8_t NPM_get_state()
 
 static bool NPM_start_stop()
 {
-	bool result;
+	bool result = false;
 	NPM_waiting_for_4 = NPM_REPLY_HEADER_4;
 	debug_outln_info(F("Switch start/stop NPM..."));
 	NPM_cmd(PmSensorCmd2::Change);
@@ -922,65 +915,10 @@ static String NPM_version_date()
 	return last_value_NPM_version;
 }
 
-static void NPM_fan_speed()
+static String NPM_temp_humi()
 {
-
-	NPM_waiting_for_5 = NPM_REPLY_HEADER_5;
-	debug_outln_info(F("Set fan speed to 50 %..."));
-	NPM_cmd(PmSensorCmd2::Speed);
-
-	while (!serialNPM.available())
-	{
-		debug_outln("Wait for Serial...", DEBUG_MAX_INFO);
-	}
-
-	while (serialNPM.available() >= NPM_waiting_for_5)
-	{
-		const uint8_t constexpr header[2] = {0x81, 0x21};
-		uint8_t state[1];
-		uint8_t data[1];
-		uint8_t checksum[1];
-		uint8_t test[5];
-
-		switch (NPM_waiting_for_5)
-		{
-		case NPM_REPLY_HEADER_5:
-			if (serialNPM.find(header, sizeof(header)))
-				NPM_waiting_for_5 = NPM_REPLY_STATE_5;
-			break;
-		case NPM_REPLY_STATE_5:
-			serialNPM.readBytes(state, sizeof(state));
-			NPM_state(state[0]);
-			NPM_waiting_for_5 = NPM_REPLY_DATA_5;
-			break;
-		case NPM_REPLY_DATA_5:
-			if (serialNPM.readBytes(data, sizeof(data)) == sizeof(data))
-			{
-				NPM_data_reader(data, 1);
-			}
-			NPM_waiting_for_5 = NPM_REPLY_CHECKSUM_5;
-			break;
-		case NPM_REPLY_CHECKSUM_5:
-			serialNPM.readBytes(checksum, sizeof(checksum));
-			memcpy(test, header, sizeof(header));
-			memcpy(&test[sizeof(header)], state, sizeof(state));
-			memcpy(&test[sizeof(header) + sizeof(state)], data, sizeof(data));
-			memcpy(&test[sizeof(header) + sizeof(state) + sizeof(data)], checksum, sizeof(checksum));
-			NPM_data_reader(test, 5);
-			NPM_waiting_for_5 = NPM_REPLY_HEADER_5;
-			if (NPM_checksum_valid_5(test))
-			{
-				debug_outln_info(F("Checksum OK..."));
-			}
-			break;
-		}
-	}
-}
-
-static String NPM_temp_humi() 
-{
-	uint16_t NPM_temp;
-	uint16_t NPM_humi;
+	uint16_t NPM_temp = 0;
+	uint16_t NPM_humi = 0;
 	NPM_waiting_for_8 = NPM_REPLY_HEADER_8;
 	debug_outln_info(F("Temperature/Humidity in Next PM..."));
 	NPM_cmd(PmSensorCmd2::Temphumi);
@@ -1765,6 +1703,7 @@ static void webserver_config_send_body_get(String &page_content)
 	add_form_checkbox_sensor(Config_bmx280_read, FPSTR(INTL_BMX280));
 	add_form_checkbox_sensor(Config_sht3x_read, FPSTR(INTL_SHT3X));
 	add_form_checkbox_sensor(Config_scd30_read, FPSTR(INTL_SCD30));
+	add_form_checkbox_sensor(Config_scd30_auto_calibration, FPSTR(INTL_SCD30_AUTO_CALIBRATION));
 
 	// Paginate page after ~ 1500 Bytes
 	server.sendContent(page_content);
@@ -3935,12 +3874,12 @@ static void fetchSensorNPM(String &s)
 				uint8_t data[12];
 				uint8_t checksum[1];
 				uint8_t test[16];
-				uint16_t N1_serial;
-				uint16_t N25_serial;
-				uint16_t N10_serial;
-				uint16_t pm1_serial;
-				uint16_t pm25_serial;
-				uint16_t pm10_serial;
+				uint16_t N1_serial = 0;
+				uint16_t N25_serial = 0;
+				uint16_t N10_serial = 0;
+				uint16_t pm1_serial = 0;
+				uint16_t pm25_serial = 0;
+				uint16_t pm10_serial = 0;
 
 				switch (NPM_waiting_for_16)
 				{
@@ -4901,6 +4840,14 @@ static void display_values()
 	float nc040_value = -1.0;
 	float nc050_value = -1.0;
 	float nc100_value = -1.0;
+
+	(void) pm001_value;
+	(void) pm003_value;
+	(void) pm005_value;
+	(void) pm05_value;
+	(void) nc001_value;
+	(void) nc003_value;
+	(void) nc050_value;
 	float la_eq_value = -1.0;
 	float la_max_value = -1.0;
 	float la_min_value = -1.0;
@@ -5672,15 +5619,15 @@ static void powerOnTestSensors()
 	if (cfg::scd30_read)
 	{
 		debug_outln_info(F("Read SCD30..."));
-		if (!scd30.begin())
+		if (!scd30.begin(Wire, cfg::scd30_auto_calibration))
 		{
 			debug_outln_error(F("Check SCD30 wiring"));
 			scd30_init_failed = true;
 		}
-/*		else
+		else
 		{
 			scd30.setMeasurementInterval(30);
-		} */
+		}
 	}
 
 	if (cfg::ds18b20_read)

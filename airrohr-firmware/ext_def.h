@@ -279,6 +279,7 @@ static const char MEASUREMENT_NAME_INFLUX[] PROGMEM = "feinstaub";
 // SHT3x, temperature, pressure, CO2
 #define SCD30_READ 0
 #define SCD30_API_PIN 17
+#define SCD30_AUTO_CALIBRATION 1
 
 // DS18B20, temperature
 #define DS18B20_READ 0

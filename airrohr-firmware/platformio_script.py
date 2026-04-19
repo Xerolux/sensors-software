@@ -10,7 +10,7 @@ def after_build(source, target, env):
     if not os.path.exists("builds"):
         os.mkdir("builds")
 
-    lang = env.GetProjectOption('lang')
+    lang = env.GetProjectOption('custom_lang', env.GetProjectOption('lang', 'de'))
     target_name = lang.lower()
 
     with open(f"builds/latest_{target_name}.bin.md5", "w") as md5:

@@ -48,7 +48,7 @@
  *                                                                      *
  ************************************************************************
  *
- * latest build using lib 2.6.2
+ * latest build using espressif8266@4.2.1 / ArduinoJson v7
  * DATA:    [====      ]  41.7% (used 34128 bytes from 81920 bytes)
  * PROGRAM: [======    ]  67.2% (used 701371 bytes from 1044464 bytes)
  *  
@@ -58,7 +58,7 @@
 #include <pgmspace.h>
 
 // increment on change
-#define SOFTWARE_VERSION_STR "NRZ-2024-136-B1"
+#define SOFTWARE_VERSION_STR "NRZ-2026-136-B1"
 String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 
 /*****************************************************************
@@ -98,9 +98,6 @@ String SOFTWARE_VERSION(SOFTWARE_VERSION_STR);
 #include <SH1106.h>
 #include <LiquidCrystal_I2C.h>
 #include <PubSubClient.h>
-#define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
-#define ARDUINOJSON_ENABLE_ARDUINO_PRINT 0
-#define ARDUINOJSON_DECODE_UNICODE 0
 #include <ArduinoJson.h>
 #include <DNSServer.h>
 #include "./DHT.h"
@@ -734,9 +731,6 @@ static String SDS_version_date()
 		debug_outln_verbose(FPSTR(DBG_TXT_START_READING), FPSTR(DBG_TXT_SDS011_VERSION_DATE));
 		is_SDS_running = SDS_cmd(PmSensorCmd::Start);
 		delay(250);
-#if defined(ESP8266)
-		serialSDS.perform_work();
-#endif
 		serialSDS.flush();
 		// Query Version/Date
 		SDS_rawcmd(0x07, 0x00, 0x00);
@@ -1041,7 +1035,7 @@ static void disable_unneeded_nmea()
  *****************************************************************/
 
 /* backward compatibility for the times when we stored booleans as strings */
-static bool boolFromJSON(const DynamicJsonDocument &json, const __FlashStringHelper *key)
+static bool boolFromJSON(const JsonDocument &json, const __FlashStringHelper *key)
 {
 	if (json[key].is<const char *>())
 	{
@@ -1075,7 +1069,7 @@ static void readConfig(bool oldconfig = false)
 	}
 
 	debug_outln_info(F("opened config file..."));
-	DynamicJsonDocument json(JSON_BUFFER_SIZE);
+	JsonDocument json;
 	DeserializationError err = deserializeJson(json, configFile.readString());
 	debug_outln_info(F("parsing json: "), err.f_str());
 	configFile.close();
@@ -1206,7 +1200,7 @@ static void init_config()
  *****************************************************************/
 static bool writeConfig()
 {
-	DynamicJsonDocument json(JSON_BUFFER_SIZE);
+	JsonDocument json;
 	debug_outln_info(F("Saving config..."));
 	json["SOFTWARE_VERSION"] = SOFTWARE_VERSION;
 
@@ -2597,7 +2591,7 @@ static void webserver_metrics_endpoint()
 	page_content.replace("$u", String(msSince(time_point_device_start_ms)));
 	page_content.replace("$s", String(cfg::sending_intervall_ms));
 	page_content.replace("$c", String(count_sends));
-	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	JsonDocument json2data;
 	DeserializationError err = deserializeJson(json2data, last_data_string);
 	if (!err)
 	{
@@ -2818,8 +2812,8 @@ static void wifiConfig()
 		dnsServer.processNextRequest();
 		server.handleClient();
 #if defined(ESP8266)
-		wdt_reset(); // nodemcu is alive
-		MDNS.update();
+	wdt_reset(); // nodemcu is alive
+	MDNS.update();
 #endif
 		yield();
 	}
@@ -3131,7 +3125,7 @@ static unsigned long sendSensorCommunity(const String &data, const int pin, cons
  *****************************************************************/
 static void create_influxdb_string_from_data(String &data_4_influxdb, const String &data)
 {
-	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	JsonDocument json2data;
 	DeserializationError err = deserializeJson(json2data, data);
 	if (!err)
 	{
@@ -3175,7 +3169,7 @@ static void create_influxdb_string_from_data(String &data_4_influxdb, const Stri
  *****************************************************************/
 static void send_csv(const String &data)
 {
-	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	JsonDocument json2data;
 	DeserializationError err = deserializeJson(json2data, data);
 	debug_outln_info(F("CSV Output: "), data);
 	if (!err)
@@ -3220,7 +3214,7 @@ static bool haDiscoverySent = false;
 static void publishHASensor(const char* objectId, const char* name, const char* unit, const char* icon, const String& stateTopic, const char* valueTemplate)
 {
 	String discoveryTopic = String(F("homeassistant/sensor/")) + esp_chipid + F("/") + objectId + F("/config");
-	DynamicJsonDocument doc(512);
+	JsonDocument doc;
 	doc[F("name")] = name;
 	doc[F("uniq_id")] = String(esp_chipid) + "_" + objectId;
 	doc[F("stat_t")] = stateTopic;
@@ -3230,11 +3224,11 @@ static void publishHASensor(const char* objectId, const char* name, const char* 
 	{
 		doc[F("icon")] = icon;
 	}
-	JsonObject dev = doc.createNestedObject(F("dev"));
+	JsonObject dev = doc[F("dev")].to<JsonObject>();
 	dev[F("name")] = String(F("airRohr ")) + esp_chipid;
 	dev[F("mf")] = F("Sensor.Community");
 	dev[F("mdl")] = F("airRohr");
-	JsonArray ids = dev.createNestedArray(F("ids"));
+	JsonArray ids = dev[F("ids")].to<JsonArray>();
 	ids.add(esp_chipid);
 
 	String payload;
@@ -3349,7 +3343,7 @@ static void sendMQTTData(const String& data)
 		return;
 	}
 
-	DynamicJsonDocument json2data(JSON_BUFFER_SIZE);
+	JsonDocument json2data;
 	DeserializationError err = deserializeJson(json2data, data);
 	if (err)
 	{
@@ -3362,7 +3356,7 @@ static void sendMQTTData(const String& data)
 
 	String topic = String(cfg::topic_mqtt);
 
-	StaticJsonDocument<512> outDoc;
+	JsonDocument outDoc;
 	for (JsonObject measurement : json2data[FPSTR(JSON_SENSOR_DATA_VALUES)].as<JsonArray>())
 	{
 		outDoc[measurement["value_type"].as<const char*>()] = measurement["value"];
@@ -6503,15 +6497,6 @@ void loop(void)
 
 #if defined(ESP8266)
 	MDNS.update();
-	if (cfg::npm_read)
-	{
-		serialNPM.perform_work();
-	}
-	else
-	{
-		serialSDS.perform_work();
-	}
-
 #endif
 
 	// Sleep if all of the tasks have an event in the future. The chip can then

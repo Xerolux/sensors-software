@@ -233,7 +233,7 @@ namespace cfg
 
 	void initNonTrivials(const char *id)
 	{
-		strcpy(cfg::current_lang, CURRENT_LANG);
+		snprintf(cfg::current_lang, sizeof(cfg::current_lang), "%s", CURRENT_LANG);
 		strcpy_P(www_username, WWW_USERNAME);
 		strcpy_P(www_password, WWW_PASSWORD);
 		strcpy_P(wlanssid, WLANSSID);
@@ -250,8 +250,7 @@ namespace cfg
 
 		if (!*fs_ssid)
 		{
-			strcpy(fs_ssid, SSID_BASENAME);
-			strcat(fs_ssid, id);
+			snprintf(fs_ssid, sizeof(fs_ssid), "%s%s", SSID_BASENAME, id);
 		}
 	}
 }
@@ -2777,7 +2776,7 @@ static void wifiConfig()
 	// Use 13 channels if locale is not "EN"
 	wifi_country_t wifi;
 	wifi.policy = WIFI_COUNTRY_POLICY_MANUAL;
-	strcpy(wifi.cc, INTL_LANG);
+	snprintf(wifi.cc, sizeof(wifi.cc), "%s", INTL_LANG);
 	wifi.nchan = (INTL_LANG[0] == 'E' && INTL_LANG[1] == 'N') ? 11 : 13;
 	wifi.schan = 1;
 
@@ -2821,7 +2820,7 @@ static void wifiConfig()
 	WiFi.softAPdisconnect(true);
 
 	wifi.policy = WIFI_COUNTRY_POLICY_MANUAL;
-	strcpy(wifi.cc, INTL_LANG);
+	snprintf(wifi.cc, sizeof(wifi.cc), "%s", INTL_LANG);
 	wifi.nchan = 13;
 	wifi.schan = 1;
 
@@ -2919,7 +2918,7 @@ static void connectWifi()
 	// Use 13 channels for connect to known AP
 	wifi_country_t wifi;
 	wifi.policy = WIFI_COUNTRY_POLICY_MANUAL;
-	strcpy(wifi.cc, INTL_LANG);
+	snprintf(wifi.cc, sizeof(wifi.cc), "%s", INTL_LANG);
 	wifi.nchan = 13;
 	wifi.schan = 1;
 
